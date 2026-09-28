@@ -10,6 +10,31 @@ A lightweight sandboxing tool for enforcing filesystem and network restrictions 
 
 ## Installation
 
+### From source (recommended for local development)
+
+```bash
+# Clone the repo
+git clone git@github.com:kadirlofca/sandbox-runtime.git
+cd sandbox-runtime
+
+# Install dependencies
+npm install
+
+# Build
+./node_modules/.bin/tsc
+
+# Install globally from local source
+npm install -g . --ignore-scripts
+```
+
+Verify:
+
+```bash
+srt --version
+```
+
+### From npm
+
 ```bash
 npm install -g @anthropic-ai/sandbox-runtime
 ```
