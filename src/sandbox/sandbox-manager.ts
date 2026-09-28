@@ -364,7 +364,7 @@ async function filterNetworkRequest(
   const canonicalHost = canonicalizeHost(host) ?? host
 
   // Check denied domains first
-  for (const deniedDomain of config.network.deniedDomains) {
+  for (const deniedDomain of config.network.deniedDomains ?? []) {
     if (matchesDomainPatternWithPort(canonicalHost, port, deniedDomain)) {
       logForDebugging(`Denied by config rule: ${host}:${port}`)
       // The matched entry's own reason when the caller supplied one, so the
@@ -378,7 +378,7 @@ async function filterNetworkRequest(
   }
 
   // Check allowed domains
-  for (const allowedDomain of config.network.allowedDomains) {
+  for (const allowedDomain of config.network.allowedDomains ?? []) {
     if (matchesDomainPatternWithPort(canonicalHost, port, allowedDomain)) {
       logForDebugging(`Allowed by config rule: ${host}:${port}`)
       return true
@@ -587,7 +587,7 @@ async function startMuxProxyServer(
       // cannot-authenticate refusal rather than a policy claim.
       if (!config) return {}
       const canonical = canonicalizeHost(host) ?? host
-      for (const entry of config.network.deniedDomains) {
+      for (const entry of config.network.deniedDomains ?? []) {
         if (matchesDomainPatternWithPort(canonical, port, entry)) {
           const reason =
             config.network.deniedDomainReasons?.[entry] ??
@@ -1495,7 +1495,7 @@ function getNetworkRestrictionConfig(): NetworkRestrictionConfig {
   // unrestricted. deniedHosts keeps the strip — an empty denylist and an
   // absent one are semantically identical.
   const allowedHosts = config.network.allowedDomains
-  const deniedHosts = config.network.deniedDomains
+  const deniedHosts = config.network.deniedDomains ?? []
 
   return {
     allowedHosts,

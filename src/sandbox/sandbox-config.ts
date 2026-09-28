@@ -716,12 +716,15 @@ export const CredentialsConfigSchema = z
 export const NetworkConfigSchema = z.object({
   allowedDomains: z
     .array(domainPortPatternSchema)
+    .optional()
     .describe(
       'List of allowed domains (e.g., ["github.com", "*.npmjs.org", "api.example.com:443"]). ' +
-        'An optional ":port" suffix restricts the entry to that destination port.',
+        'An optional ":port" suffix restricts the entry to that destination port. ' +
+        'If omitted, all network access is allowed (no network restrictions applied).',
     ),
   deniedDomains: z
     .array(deniedDomainPatternSchema)
+    .optional()
     .describe(
       'List of denied domains. Unlike allowedDomains, a bare "*" is accepted here (deny-all). ' +
         'An optional ":port" suffix (e.g., "*:22") restricts the entry to that destination port.',
@@ -1212,7 +1215,9 @@ export const SandboxRuntimeConfigSchema = z
     // when `allowedDomains: ['*.github.com']`.
     // Host-scoped view of the allowlist (":port" suffixes dropped) —
     // injection is per-host, not per-port.
-    const allowedHosts = cfg.network.allowedDomains.map(stripDomainPatternPort)
+    const allowedHosts = (cfg.network.allowedDomains ?? []).map(
+      stripDomainPatternPort,
+    )
     const checkSubset = (
       hosts: readonly string[],
       path: (string | number)[],
