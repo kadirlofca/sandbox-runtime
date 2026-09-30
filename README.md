@@ -549,13 +549,27 @@ This denies reading anything under `/Users` (or `/home` on Linux), then re-allow
 
 ### Common Issues and Tips
 
-**Running Jest:** Use `--no-watchman` flag to avoid sandbox violations:
+**macOS Keychain: login succeeds but auth fails with 401**
+
+On macOS, apps that store credentials in the macOS Keychain via the native `Security.framework` API can fail to authenticate after logging in inside srt. The cause is a keychain ACL restriction: entries created outside the sandbox (by a non-sandboxed process) carry an ACL bound to the creating process's identity. The sandboxed process cannot update those entries — SecurityServer enforces the ACL at the IPC level — so the app reads a stale token from the keychain and gets 401.
+
+**Fix:** delete the existing keychain entry, then log in from inside srt. The sandboxed process creates a fresh entry via the `security` CLI, which uses a permissive ACL that any process can update going forward.
 
 ```bash
-srt "jest --no-watchman"
+# Find the service name for Claude Code (adjust CLAUDE_CONFIG_DIR if using a custom path):
+node -e '
+const c=require("crypto"),o=require("os"),p=require("path");
+const dir=process.env.CLAUDE_CONFIG_DIR||p.join(o.homedir(),".claude");
+console.log("Claude Code-credentials-"+c.createHash("sha256").update(dir.normalize("NFC")).digest("hex").slice(0,8));
+'
+
+# Delete the restrictive entry:
+security delete-generic-password -a "$USER" -s "<service-name-from-above>"
 ```
 
-Watchman accesses files outside the sandbox boundaries, which will trigger permission errors. Disabling it allows Jest to run with the built-in file watcher instead.
+Then run the login flow from inside srt. This is a one-time step per config directory. This issue is macOS-only.
+
+**Running Jest:** Use `--no-watchman` flag to avoid sandbox violations:
 
 ## Platform Support
 
