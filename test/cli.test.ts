@@ -3,8 +3,10 @@ import { spawnSync } from 'node:child_process'
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -195,6 +197,78 @@ describe('CLI', () => {
         expect(result.stdout).not.toContain('should-not-run')
       } finally {
         rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('refuses to run when --settings points to a swappable link', () => {
+      if (process.getuid?.() === 0) return // root bypasses writable checks
+      const dir = mkdtempSync(join(tmpdir(), 'srt-cli-lnk-'))
+      const realDir = realpathSync(dir) // macOS: /tmp -> /private/tmp
+      try {
+        const realFile = join(realDir, 'real.json')
+        writeFileSync(
+          realFile,
+          JSON.stringify({
+            network: { defaultAllow: true },
+            filesystem: { defaultAllow: true, denyRead: [], denyWrite: [] },
+          }),
+        )
+        const link = join(realDir, 'settings.json')
+        symlinkSync(realFile, link)
+        const result = runCli(['--settings', link, 'echo', 'should-not-run'])
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain('symlink')
+        expect(result.stderr).toContain(link)
+        expect(result.stdout).not.toContain('should-not-run')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('does not refuse a real file (non-swappable path)', () => {
+      if (process.getuid?.() === 0) return // root bypasses writable checks
+      const dir = mkdtempSync(join(tmpdir(), 'srt-cli-real-'))
+      const realDir = realpathSync(dir)
+      try {
+        const realFile = join(realDir, 'real.json')
+        writeFileSync(
+          realFile,
+          JSON.stringify({
+            network: { defaultAllow: true },
+            filesystem: { defaultAllow: true, denyRead: [], denyWrite: [] },
+          }),
+        )
+        // Passing the real file path directly (not through a link) must not
+        // trigger the swap refusal, regardless of whether the sandbox itself
+        // can start in this environment.
+        const result = runCli(['--settings', realFile, 'echo', 'ok'])
+        expect(result.stderr).not.toContain('goes through')
+        expect(result.stderr).not.toContain('could replace that link')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('refuses when default ~/.srt-settings.json is a swappable link', () => {
+      if (process.getuid?.() === 0) return
+      const home = mkdtempSync(join(tmpdir(), 'srt-cli-home-'))
+      const realHome = realpathSync(home)
+      try {
+        const target = join(realHome, 'real.json')
+        writeFileSync(
+          target,
+          JSON.stringify({
+            network: { defaultAllow: true },
+            filesystem: { defaultAllow: true, denyRead: [], denyWrite: [] },
+          }),
+        )
+        symlinkSync(target, join(realHome, '.srt-settings.json'))
+        const result = runCli(['echo', 'should-not-run'], { home: realHome })
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain('symlink')
+        expect(result.stdout).not.toContain('should-not-run')
+      } finally {
+        rmSync(home, { recursive: true, force: true })
       }
     })
   })
