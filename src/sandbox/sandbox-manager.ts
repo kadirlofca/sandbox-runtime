@@ -1354,7 +1354,7 @@ function getFsWriteConfig(): FsWriteRestrictionConfig {
     return { allowOnly: ['/'], denyWithinAllow: [] }
   }
 
-  const allowPaths = stripWriteGlobs(config.filesystem.allowWrite)
+  const allowPaths = stripWriteGlobs(config.filesystem.allowWrite ?? ['/'])
   const denyPaths = stripWriteGlobs(config.filesystem.denyWrite)
 
   const allowOnly = [
@@ -1445,7 +1445,7 @@ function rawWindowsFsInputs(c: SandboxRuntimeConfig) {
     denyRead: [...c.filesystem.denyRead],
     denyWrite: [...c.filesystem.denyWrite],
     allowRead: [...(c.filesystem.allowRead ?? [])],
-    allowWrite: [...c.filesystem.allowWrite],
+    allowWrite: [...(c.filesystem.allowWrite ?? [])],
     credFiles: getCredentialDenyReadPaths(c.credentials),
   }
 }
@@ -1671,11 +1671,10 @@ async function wrapWithSandbox(
   let writeConfig: FsWriteRestrictionConfig | undefined
   let readConfig: FsReadRestrictionConfig | undefined
   if (!fsDisabled) {
-    const userAllowWrite = stripWriteGlobs(
-      customConfig?.filesystem?.allowWrite ??
-        config?.filesystem.allowWrite ??
-        [],
-    )
+    const rawAllowWrite =
+      customConfig?.filesystem?.allowWrite ?? config?.filesystem?.allowWrite
+    const userAllowWrite =
+      rawAllowWrite === undefined ? ['/'] : stripWriteGlobs(rawAllowWrite)
     writeConfig = {
       allowOnly: [
         ...defaultWritePathsUnder({
@@ -2374,7 +2373,7 @@ function getLinuxGlobPatternWarnings(): string[] {
   // Write paths take no globs at all on Linux: bubblewrap binds concrete
   // paths, and nothing expands them.
   const allPaths = [
-    ...config.filesystem.allowWrite,
+    ...(config.filesystem.allowWrite ?? []),
     ...config.filesystem.denyWrite,
   ]
 

@@ -64,14 +64,9 @@ const FILE_RULES =
  */
 function getDefaultConfig(): SandboxRuntimeConfig {
   return {
-    network: {
-      allowedDomains: [],
-      deniedDomains: [],
-    },
+    network: {},
     filesystem: {
       denyRead: [],
-      allowRead: [],
-      allowWrite: [],
       denyWrite: [],
     },
   }
