@@ -917,7 +917,9 @@ export const FilesystemConfigSchema = z.object({
     .optional()
     .describe(
       'Paths allowed for writing. Omit to allow writes everywhere (only denyWrite is enforced). ' +
-        'Set to [] to block all writes.',
+        'Set to [] to block all writes. ' +
+        'Note: on Windows, omitting this field does not grant write access everywhere — ' +
+        'the sandbox user has no inherent file rights, so explicit paths are still required.',
     ),
   denyWrite: z
     .array(filesystemPathSchema)
