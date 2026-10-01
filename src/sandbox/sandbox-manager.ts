@@ -27,7 +27,6 @@ import { whichSync } from '../utils/which.js'
 import type { RipgrepConfig } from '../utils/ripgrep.js'
 import { getPlatform, getWslVersion } from '../utils/platform.js'
 import * as fs from 'fs'
-import { existsSync } from 'fs'
 import { randomBytes } from 'node:crypto'
 import type {
   CredentialsConfig,
@@ -1423,14 +1422,11 @@ function computeWindowsFsAccessSet(c: SandboxRuntimeConfig): {
   // Windows ACL evaluation gives explicit DENY precedence over explicit ALLOW
   // for the same principal on the same object, so a user allowWrite grant on
   // the same path cannot override these mandatory denies.
-  // Only include paths that exist on disk: srt-win creates an empty placeholder
-  // file for non-existent deny targets, which loadConfig then reads as 'empty'
-  // and refuses to start. A missing settings file has nothing to protect yet.
+  // Non-existent paths are included deliberately: srt-win creates an empty
+  // placeholder to stamp the ACE on, and config-loader treats that placeholder
+  // as missing (not 'empty') via the stale-stub heuristic.
   const denyWrite = expand(
-    [
-      ...(fs?.denyWrite ?? []),
-      ...getSettingsDenyPaths().filter(p => existsSync(p)),
-    ],
+    [...(fs?.denyWrite ?? []), ...getSettingsDenyPaths()],
     { mode: 'deny' },
   )
   return {

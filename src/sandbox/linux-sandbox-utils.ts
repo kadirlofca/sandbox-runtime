@@ -291,11 +291,11 @@ export function linuxGetCwdMandatoryDenyPaths(
     // Dangerous directories in CWD
     ...getDangerousDirectories().map(d => path.resolve(cwd, d)),
     // Absolute paths always denied (e.g. ~/.srt-settings.json).
-    // Filter to paths that exist: bwrap creates a host-side stub file for
-    // non-existent bind targets, which concurrent srt sessions see as 'empty'
-    // and refuse to start, and which persists on crash or SIGKILL.
-    // A missing settings file has nothing to protect yet.
-    ...getSettingsDenyPaths().filter(p => fs.existsSync(p)),
+    // Non-existent paths are included deliberately: bwrap creates an empty
+    // read-only stub at the path (ensure_file(dest, 0444)) so the bind lands,
+    // and config-loader detects that stub via isStaleBwrapMountPoint and treats
+    // it as missing rather than refusing with 'empty'.
+    ...getSettingsDenyPaths(),
   ]
 
   // Git hooks and config are only denied when .git exists as a directory.

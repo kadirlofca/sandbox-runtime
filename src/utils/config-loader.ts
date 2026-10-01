@@ -62,6 +62,26 @@ export function loadConfig(filePath: string): LoadConfigResult {
   }
 
   if (content.trim() === '') {
+    // Detect a stale bwrap mount-point stub: bwrap creates the mount-point
+    // file with ensure_file(dest, 0444) — an empty regular file, no write
+    // bits, single hard link. A deliberate user-created empty file retains
+    // write bits (0666 & ~umask). A stale stub means srt crashed or was
+    // killed before cleanup; it should be treated as missing (use defaults)
+    // rather than refusing to start. The same heuristic catches the
+    // empty placeholder srt-win stamps on Windows.
+    try {
+      const st = fs.statSync(filePath)
+      if (
+        st.isFile() &&
+        st.size === 0 &&
+        (st.mode & 0o222) === 0 &&
+        st.nlink === 1
+      ) {
+        return { kind: 'missing' }
+      }
+    } catch {
+      // stat failed — fall through to the 'empty' refusal
+    }
     return { kind: 'empty' }
   }
 
