@@ -1,6 +1,6 @@
-# Anthropic Sandbox Runtime (srt)
+# srt — Sandbox Runtime
 
-A lightweight sandboxing tool for enforcing filesystem and network restrictions on arbitrary processes at the OS level, without requiring a container.
+A lightweight sandboxing tool for enforcing filesystem and network restrictions on arbitrary processes at the OS level, without requiring a container. Permissive by default — you define what to block, not what to allow.
 
 `srt` uses native OS sandboxing primitives (`sandbox-exec` on macOS, `bubblewrap` on Linux) and proxy-based network filtering. It can be used to sandbox the behaviour of agents, local MCP servers, bash commands and arbitrary processes.
 
@@ -186,7 +186,7 @@ src/
 
 ### As a CLI tool
 
-The `srt` command (Anthropic Sandbox Runtime) wraps any command with security boundaries:
+The `srt` command wraps any command with security boundaries:
 
 ```bash
 # Run a command in the sandbox
@@ -208,6 +208,12 @@ config rather than a weaker one — falling back would drop the file's
 `denyRead`, `allowRead` and credential rules along with everything else it
 said. The same goes for a file named with `--settings`, which must also
 exist.
+
+If the settings path goes through a symlink that sits in a writable directory,
+`srt` refuses to start — a sandboxed process could unlink that symlink and
+redirect it to an attacker-controlled file. To fix this, point `--settings` at
+the real file directly (e.g. `srt --settings ~/dotfiles/srt.json ...`), or
+replace the symlink with a regular file.
 
 #### Updating the config while the command runs: `--control-fd`
 

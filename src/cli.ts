@@ -6,7 +6,10 @@ import type { SandboxRuntimeConfig } from './sandbox/sandbox-config.js'
 import { spawn, type ChildProcess } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
 import { loadConfig, loadConfigFromString } from './utils/config-loader.js'
-import { setCustomSettingsPath } from './sandbox/sandbox-utils.js'
+import {
+  setCustomSettingsPath,
+  findSwappableSymlink,
+} from './sandbox/sandbox-utils.js'
 import * as readline from 'readline'
 import * as fs from 'fs'
 import * as net from 'net'
@@ -303,6 +306,35 @@ async function main(): Promise<void> {
 
           // Load config from file
           const configPath = options.settings || getDefaultConfigPath()
+
+          // Refuse if the settings path goes through a symlink whose parent
+          // directory is writable — a sandboxed process could unlink the
+          // symlink and swap in one pointing to an attacker-controlled file.
+          try {
+            const swappable = findSwappableSymlink(configPath)
+            if (swappable) {
+              let realPath: string
+              try {
+                realPath = fs.realpathSync(path.resolve(configPath))
+              } catch {
+                realPath = path.resolve(configPath)
+              }
+              refuseSettings(
+                `${configPath} goes through the symlink ${swappable.link} -> ${swappable.target}, ` +
+                  `which sits in ${swappable.dir}, a directory sandboxed commands can write to. ` +
+                  `A sandboxed command could replace that link and choose the rules for the next run. ` +
+                  `Pass the real file with --settings ${realPath}, or replace the symlink with a regular file.`,
+                FILE_RULES,
+              )
+            }
+          } catch (err) {
+            if (typeof err === 'string') {
+              refuseSettings(err, FILE_RULES)
+            } else {
+              throw err
+            }
+          }
+
           // Protect the active settings file (default or custom) from writes
           // inside the sandbox. Must be called before SandboxManager.initialize().
           setCustomSettingsPath(configPath)

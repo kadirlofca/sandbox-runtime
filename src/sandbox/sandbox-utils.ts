@@ -55,16 +55,78 @@ export function setCustomSettingsPath(p: string): void {
  * Returns the settings path(s) that must always be write-denied, regardless
  * of user config. Returns an empty array until setCustomSettingsPath is called,
  * so library users who do not use a settings file incur no mandatory deny.
- *
- * Note (Linux symlink): when the settings path is a symlink, bwrap's bind
- * mount lands on the resolved target, not the symlink entry itself. The
- * symlink can still be unlinked and replaced within the sandbox (a writable
- * home directory is required). Making the symlink entry itself immutable
- * would require denying the parent directory, which is too broad. This is a
- * known limitation of the bwrap approach.
  */
 export function getSettingsDenyPaths(): string[] {
   return _registeredSettingsPath ? [_registeredSettingsPath] : []
+}
+
+/**
+ * Walk every component of `settingsPath` (kernel-style, following symlinks
+ * through non-writable directories) and return the first symlink found whose
+ * parent directory is writable by the current process. A symlink in a writable
+ * directory can be unlinked and replaced by a sandboxed process, letting it
+ * choose what config the next srt run loads.
+ *
+ * Returns undefined when the path is safe (no swappable symlinks found, or
+ * the path doesn't exist yet). Throws a string reason when the path cannot be
+ * checked — callers should treat this as a fatal error.
+ *
+ * Windows always returns undefined (symlink semantics differ; the sandbox
+ * user has no inherent file rights there).
+ */
+export function findSwappableSymlink(
+  settingsPath: string,
+): { link: string; target: string; dir: string } | undefined {
+  if (getPlatform() === 'windows') return undefined
+
+  const MAX_SYMLINKS = 40
+  let symlinksFollowed = 0
+  let dir = '/'
+  let remaining = path.resolve(settingsPath).split('/').filter(Boolean)
+
+  while (remaining.length > 0) {
+    const name = remaining.shift()!
+    const full = path.join(dir, name)
+
+    let st: fs.Stats
+    try {
+      st = fs.lstatSync(full)
+    } catch (err) {
+      if (isAbsenceErrno(err)) return undefined
+      throw `${full} could not be checked (${(err as NodeJS.ErrnoException).code ?? String(err)}).`
+    }
+
+    if (!st.isSymbolicLink()) {
+      dir = full
+      continue
+    }
+
+    // Symlink found — refuse if its parent directory is writable by us.
+    let parentWritable = true
+    try {
+      fs.accessSync(dir, fs.constants.W_OK)
+    } catch {
+      parentWritable = false
+    }
+
+    const linkTarget = fs.readlinkSync(full)
+    if (parentWritable) {
+      return { link: full, target: linkTarget, dir }
+    }
+
+    // Safe to follow — symlink is in a non-writable directory.
+    if (++symlinksFollowed > MAX_SYMLINKS) {
+      throw `${settingsPath} contains a symlink loop.`
+    }
+    const resolved = path.isAbsolute(linkTarget)
+      ? linkTarget
+      : path.join(dir, linkTarget)
+    const nextComponents = resolved.split('/').filter(Boolean)
+    if (path.isAbsolute(linkTarget)) dir = '/'
+    remaining = [...nextComponents, ...remaining]
+  }
+
+  return undefined
 }
 
 /**
