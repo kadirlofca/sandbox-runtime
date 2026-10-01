@@ -83,6 +83,7 @@ export function findSwappableSymlink(
   let symlinksFollowed = 0
   let dir = '/'
   let remaining = path.resolve(settingsPath).split('/').filter(Boolean)
+  const myUid = process.getuid?.()
 
   while (remaining.length > 0) {
     const name = remaining.shift()!
@@ -101,20 +102,39 @@ export function findSwappableSymlink(
       continue
     }
 
-    // Symlink found — refuse if its parent directory is writable by us.
-    let parentWritable = true
+    // Symlink found. Determine if its parent directory (dir) can be written
+    // by the current process. access(W_OK) covers the normal case, but the
+    // user also owns any directory they created, so they can chmod it
+    // writable even when the current mode forbids writes. Both conditions
+    // must be checked.
+    let parentSwappable = false
     try {
       fs.accessSync(dir, fs.constants.W_OK)
+      parentSwappable = true
     } catch {
-      parentWritable = false
+      if (myUid !== undefined) {
+        try {
+          parentSwappable = fs.lstatSync(dir).uid === myUid
+        } catch {
+          // can't stat the parent — treat as not swappable
+        }
+      }
     }
 
-    const linkTarget = fs.readlinkSync(full)
-    if (parentWritable) {
+    let linkTarget: string
+    try {
+      linkTarget = fs.readlinkSync(full)
+    } catch (err) {
+      throw `${full} could not be read as a symlink (${(err as NodeJS.ErrnoException).code ?? String(err)}).`
+    }
+
+    if (parentSwappable) {
       return { link: full, target: linkTarget, dir }
     }
 
-    // Safe to follow — symlink is in a non-writable directory.
+    // Safe to follow — symlink is in a directory the user neither owns nor
+    // can write. Always reset dir to '/' because the resolved path is always
+    // absolute (relative targets are joined with the current dir first).
     if (++symlinksFollowed > MAX_SYMLINKS) {
       throw `${settingsPath} contains a symlink loop.`
     }
@@ -122,7 +142,7 @@ export function findSwappableSymlink(
       ? linkTarget
       : path.join(dir, linkTarget)
     const nextComponents = resolved.split('/').filter(Boolean)
-    if (path.isAbsolute(linkTarget)) dir = '/'
+    dir = '/'
     remaining = [...nextComponents, ...remaining]
   }
 

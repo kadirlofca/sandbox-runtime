@@ -34,11 +34,24 @@ describeUnix('findSwappableSymlink', () => {
     expect(findSwappableSymlink(p)).toBeUndefined()
   })
 
-  it('refuses a leaf symlink in a writable directory', () => {
+  it('refuses a leaf symlink (absolute target) in a writable directory', () => {
     const target = path.join(realTmpDir, 'real.json')
     fs.writeFileSync(target, '{}')
     const link = path.join(realTmpDir, 'settings.json')
     fs.symlinkSync(target, link)
+    const result = findSwappableSymlink(link)
+    expect(result).not.toBeUndefined()
+    expect(result!.link).toBe(link)
+    expect(result!.dir).toBe(realTmpDir)
+  })
+
+  it('refuses a leaf symlink (relative target) in a writable directory', () => {
+    // Verifies that relative targets are resolved correctly — a previous bug
+    // caused the walk to go off-path and return undefined (safe) for relative targets.
+    const target = path.join(realTmpDir, 'real.json')
+    fs.writeFileSync(target, '{}')
+    const link = path.join(realTmpDir, 'settings.json')
+    fs.symlinkSync('./real.json', link) // relative target
     const result = findSwappableSymlink(link)
     expect(result).not.toBeUndefined()
     expect(result!.link).toBe(link)
@@ -66,60 +79,30 @@ describeUnix('findSwappableSymlink', () => {
     expect(result!.dir).toBe(realTmpDir)
   })
 
-  it('refuses a chain: non-writable dir link -> writable dir link -> target', () => {
-    if (isRoot) return // root can write anywhere
-
-    const protectedDir = path.join(realTmpDir, 'protected')
-    fs.mkdirSync(protectedDir)
-    const writableDir = path.join(realTmpDir, 'writable')
-    fs.mkdirSync(writableDir)
-    const realFile = path.join(realTmpDir, 'real.json')
-    fs.writeFileSync(realFile, '{}')
-
-    // finalLink is in writableDir — swappable
-    const finalLink = path.join(writableDir, 'settings.json')
-    fs.symlinkSync(realFile, finalLink)
-
-    // hop is in protectedDir (non-writable) — points to finalLink
-    const hop = path.join(protectedDir, 'hop')
-    fs.symlinkSync(finalLink, hop)
-
-    // Lock protectedDir AFTER creating the symlink
-    fs.chmodSync(protectedDir, 0o555)
-
-    try {
-      const result = findSwappableSymlink(hop)
-      expect(result).not.toBeUndefined()
-      expect(result!.link).toBe(finalLink)
-      expect(result!.dir).toBe(writableDir)
-    } finally {
-      fs.chmodSync(protectedDir, 0o755)
-    }
-  })
-
-  it('allows a symlink inside a non-writable (0555) directory', () => {
+  it('refuses a symlink in a user-owned 0555 directory (user can chmod it)', () => {
     if (isRoot) return // root bypasses permission checks
 
-    const protectedDir = path.join(realTmpDir, 'protected')
-    fs.mkdirSync(protectedDir)
+    // The directory is created by us, so uid matches even after chmod 0555.
+    // The user can always run chmod u+w on a directory they own, so the
+    // symlink is swappable and must be refused.
+    const ownedDir = path.join(realTmpDir, 'owned')
+    fs.mkdirSync(ownedDir)
     const realFile = path.join(realTmpDir, 'real.json')
     fs.writeFileSync(realFile, '{}')
-
-    // Create symlink BEFORE making the directory non-writable
-    const link = path.join(protectedDir, 'settings.json')
+    const link = path.join(ownedDir, 'settings.json')
     fs.symlinkSync(realFile, link)
-    fs.chmodSync(protectedDir, 0o555)
+    fs.chmodSync(ownedDir, 0o555)
 
     try {
       const result = findSwappableSymlink(link)
-      expect(result).toBeUndefined()
+      expect(result).not.toBeUndefined()
     } finally {
-      fs.chmodSync(protectedDir, 0o755)
+      fs.chmodSync(ownedDir, 0o755)
     }
   })
 
   it('refuses immediately when a symlink loop is in a writable directory', () => {
-    // A loop in a writable dir: we refuse at the first link (before looping)
+    // A loop in a writable dir: refused at the first link before following it.
     const a = path.join(realTmpDir, 'a')
     const b = path.join(realTmpDir, 'b')
     fs.symlinkSync(b, a)
@@ -129,23 +112,24 @@ describeUnix('findSwappableSymlink', () => {
     expect(result!.link).toBe(a)
   })
 
-  it('throws on a symlink loop inside a non-writable directory', () => {
-    if (isRoot) return // root bypasses permission checks
+  it('refuses a symlink loop inside a user-owned 0555 directory', () => {
+    if (isRoot) return
 
-    const protectedDir = path.join(realTmpDir, 'protected')
-    fs.mkdirSync(protectedDir)
-
-    // Create loop before locking dir
-    const a = path.join(protectedDir, 'a')
-    const b = path.join(protectedDir, 'b')
+    // Even in mode 0555, the user owns the dir — uid check triggers a refusal
+    // at the first link rather than entering the loop.
+    const ownedDir = path.join(realTmpDir, 'owned')
+    fs.mkdirSync(ownedDir)
+    const a = path.join(ownedDir, 'a')
+    const b = path.join(ownedDir, 'b')
     fs.symlinkSync(b, a)
     fs.symlinkSync(a, b)
-    fs.chmodSync(protectedDir, 0o555)
+    fs.chmodSync(ownedDir, 0o555)
 
     try {
-      expect(() => findSwappableSymlink(a)).toThrow()
+      const result = findSwappableSymlink(a)
+      expect(result).not.toBeUndefined()
     } finally {
-      fs.chmodSync(protectedDir, 0o755)
+      fs.chmodSync(ownedDir, 0o755)
     }
   })
 })
