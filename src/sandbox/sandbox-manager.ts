@@ -1354,7 +1354,7 @@ function getFsWriteConfig(): FsWriteRestrictionConfig {
     return { allowOnly: ['/'], denyWithinAllow: [] }
   }
 
-  const allowPaths = stripWriteGlobs(config.filesystem.allowWrite)
+  const allowPaths = stripWriteGlobs(config.filesystem.allowWrite ?? ['/'])
   const denyPaths = stripWriteGlobs(config.filesystem.denyWrite)
 
   const allowOnly = [
@@ -1424,6 +1424,12 @@ function computeWindowsFsAccessSet(c: SandboxRuntimeConfig): {
     // and explicit DENY on the parent doesn't override it because
     // the recompose chokepoint orders deny-before-allow per-path.
     grantRead: expand(fs?.allowRead ?? [], { mode: 'grant' }),
+    // NOTE: on Windows, `allowWrite: undefined` falls back to [] (no write
+    // grants), unlike macOS/Linux where it means "allow everywhere". This is
+    // intentional: the srt-sandbox account has no inherent file rights, so
+    // "allow all writes" cannot be expressed as a single path grant the way
+    // ['/'] works on POSIX. Omitting allowWrite on Windows means the sandbox
+    // user can only write where it already has access by other means.
     grantWrite: expand(fs?.allowWrite ?? [], { mode: 'grant' }),
     denyRead,
     denyWrite,
@@ -1445,7 +1451,7 @@ function rawWindowsFsInputs(c: SandboxRuntimeConfig) {
     denyRead: [...c.filesystem.denyRead],
     denyWrite: [...c.filesystem.denyWrite],
     allowRead: [...(c.filesystem.allowRead ?? [])],
-    allowWrite: [...c.filesystem.allowWrite],
+    allowWrite: [...(c.filesystem.allowWrite ?? [])],
     credFiles: getCredentialDenyReadPaths(c.credentials),
   }
 }
@@ -1671,11 +1677,10 @@ async function wrapWithSandbox(
   let writeConfig: FsWriteRestrictionConfig | undefined
   let readConfig: FsReadRestrictionConfig | undefined
   if (!fsDisabled) {
-    const userAllowWrite = stripWriteGlobs(
-      customConfig?.filesystem?.allowWrite ??
-        config?.filesystem.allowWrite ??
-        [],
-    )
+    const rawAllowWrite =
+      customConfig?.filesystem?.allowWrite ?? config?.filesystem?.allowWrite
+    const userAllowWrite =
+      rawAllowWrite === undefined ? ['/'] : stripWriteGlobs(rawAllowWrite)
     writeConfig = {
       allowOnly: [
         ...defaultWritePathsUnder({
@@ -1738,9 +1743,16 @@ async function wrapWithSandbox(
   // 1. customConfig has network.allowedDomains defined (even if empty array = block all)
   // 2. OR config has network.allowedDomains defined (even if empty array = block all)
   // An empty allowedDomains array means "no domains allowed" = block all network access
+  // The proxy must start whenever any network filtering is requested — not
+  // just when allowedDomains is set. A config with only deniedDomains or
+  // deniedResolvedAddresses would be silently unenforced without the proxy.
   const hasNetworkConfig =
     customConfig?.network?.allowedDomains !== undefined ||
-    config?.network?.allowedDomains !== undefined
+    config?.network?.allowedDomains !== undefined ||
+    customConfig?.network?.deniedDomains !== undefined ||
+    config?.network?.deniedDomains !== undefined ||
+    customConfig?.network?.deniedResolvedAddresses !== undefined ||
+    config?.network?.deniedResolvedAddresses !== undefined
 
   // Network RESTRICTION is needed whenever network config is specified
   // This includes empty allowedDomains which means "block all network"
@@ -1888,7 +1900,11 @@ async function wrapWithSandboxArgv(
   if (platform === 'windows') {
     const hasNetworkConfig =
       customConfig?.network?.allowedDomains !== undefined ||
-      config?.network?.allowedDomains !== undefined
+      config?.network?.allowedDomains !== undefined ||
+      customConfig?.network?.deniedDomains !== undefined ||
+      config?.network?.deniedDomains !== undefined ||
+      customConfig?.network?.deniedResolvedAddresses !== undefined ||
+      config?.network?.deniedResolvedAddresses !== undefined
     if (hasNetworkConfig) {
       await waitForNetworkInitialization()
     }
@@ -2374,7 +2390,7 @@ function getLinuxGlobPatternWarnings(): string[] {
   // Write paths take no globs at all on Linux: bubblewrap binds concrete
   // paths, and nothing expands them.
   const allPaths = [
-    ...config.filesystem.allowWrite,
+    ...(config.filesystem.allowWrite ?? []),
     ...config.filesystem.denyWrite,
   ]
 

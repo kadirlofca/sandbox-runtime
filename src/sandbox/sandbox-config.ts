@@ -914,7 +914,13 @@ export const FilesystemConfigSchema = z.object({
     ),
   allowWrite: z
     .array(filesystemPathSchema)
-    .describe('Paths allowed for writing'),
+    .optional()
+    .describe(
+      'Paths allowed for writing. Omit to allow writes everywhere (only denyWrite is enforced). ' +
+        'Set to [] to block all writes. ' +
+        'Note: on Windows, omitting this field does not grant write access everywhere — ' +
+        'the sandbox user has no inherent file rights, so explicit paths are still required.',
+    ),
   denyWrite: z
     .array(filesystemPathSchema)
     .describe('Paths denied for writing (takes precedence over allowWrite)'),
@@ -1107,7 +1113,9 @@ function addInertSlashedDenyGlobIssue(
  */
 export const SandboxRuntimeConfigSchema = z
   .object({
-    network: NetworkConfigSchema.describe('Network restrictions configuration'),
+    network: NetworkConfigSchema.default({}).describe(
+      'Network restrictions configuration',
+    ),
     filesystem: FilesystemConfigSchema.describe(
       'Filesystem restrictions configuration',
     ),
