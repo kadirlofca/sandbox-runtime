@@ -39,27 +39,32 @@ export function getDangerousDirectories(): string[] {
   ]
 }
 
-let _customSettingsPath: string | undefined
+let _registeredSettingsPath: string | undefined
 
 /**
- * Call once at startup when --settings points to a non-default path so
- * that file is also covered by the mandatory write-deny.
+ * Register the active settings file path so it is covered by the mandatory
+ * write-deny. Must be called before SandboxManager.initialize(). The CLI
+ * always calls this with the resolved configPath; library users of
+ * SandboxManager who use a settings file should call it themselves.
  */
 export function setCustomSettingsPath(p: string): void {
-  _customSettingsPath = path.resolve(p)
+  _registeredSettingsPath = path.resolve(p)
 }
 
 /**
- * Returns absolute paths that must always be write-denied regardless of user config.
- * Includes the default settings file and any custom path supplied via --settings.
+ * Returns the settings path(s) that must always be write-denied, regardless
+ * of user config. Returns an empty array until setCustomSettingsPath is called,
+ * so library users who do not use a settings file incur no mandatory deny.
+ *
+ * Note (Linux symlink): when the settings path is a symlink, bwrap's bind
+ * mount lands on the resolved target, not the symlink entry itself. The
+ * symlink can still be unlinked and replaced within the sandbox (a writable
+ * home directory is required). Making the symlink entry itself immutable
+ * would require denying the parent directory, which is too broad. This is a
+ * known limitation of the bwrap approach.
  */
 export function getSettingsDenyPaths(): string[] {
-  const defaultPath = path.join(homedir(), '.srt-settings.json')
-  const paths = [defaultPath]
-  if (_customSettingsPath && _customSettingsPath !== defaultPath) {
-    paths.push(_customSettingsPath)
-  }
-  return paths
+  return _registeredSettingsPath ? [_registeredSettingsPath] : []
 }
 
 /**

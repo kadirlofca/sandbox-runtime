@@ -303,12 +303,9 @@ async function main(): Promise<void> {
 
           // Load config from file
           const configPath = options.settings || getDefaultConfigPath()
-          // Protect the active settings file from writes inside the sandbox.
-          // The default path is always covered; a custom --settings path needs
-          // to be registered explicitly.
-          if (options.settings) {
-            setCustomSettingsPath(configPath)
-          }
+          // Protect the active settings file (default or custom) from writes
+          // inside the sandbox. Must be called before SandboxManager.initialize().
+          setCustomSettingsPath(configPath)
           const loaded = loadConfig(configPath)
           let runtimeConfig: SandboxRuntimeConfig
           switch (loaded.kind) {
