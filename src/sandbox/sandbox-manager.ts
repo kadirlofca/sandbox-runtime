@@ -88,6 +88,7 @@ import {
   attributionKeyFor,
   decodeSandboxedCommand,
   encodeSandboxedCommand,
+  getSettingsDenyPaths,
 } from './sandbox-utils.js'
 import {
   SandboxViolationStore,
@@ -1417,7 +1418,14 @@ function computeWindowsFsAccessSet(c: SandboxRuntimeConfig): {
     ],
     { mode: 'deny' },
   )
-  const denyWrite = expand(fs?.denyWrite ?? [], { mode: 'deny' })
+  // Mandatory denies (settings file etc.) are appended to user denyWrite.
+  // Windows ACL evaluation gives explicit DENY precedence over explicit ALLOW
+  // for the same principal on the same object, so a user allowWrite grant on
+  // the same path cannot override these mandatory denies.
+  const denyWrite = expand(
+    [...(fs?.denyWrite ?? []), ...getSettingsDenyPaths()],
+    { mode: 'deny' },
+  )
   return {
     // `allowRead` also serves as `allowWithinDeny`: a file under a
     // denied dir gets an explicit ALLOW ACE for the sandbox user,

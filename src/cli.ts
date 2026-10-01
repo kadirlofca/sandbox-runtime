@@ -6,6 +6,7 @@ import type { SandboxRuntimeConfig } from './sandbox/sandbox-config.js'
 import { spawn, type ChildProcess } from 'child_process'
 import { logForDebugging } from './utils/debug.js'
 import { loadConfig, loadConfigFromString } from './utils/config-loader.js'
+import { setCustomSettingsPath } from './sandbox/sandbox-utils.js'
 import * as readline from 'readline'
 import * as fs from 'fs'
 import * as net from 'net'
@@ -302,6 +303,12 @@ async function main(): Promise<void> {
 
           // Load config from file
           const configPath = options.settings || getDefaultConfigPath()
+          // Protect the active settings file from writes inside the sandbox.
+          // The default path is always covered; a custom --settings path needs
+          // to be registered explicitly.
+          if (options.settings) {
+            setCustomSettingsPath(configPath)
+          }
           const loaded = loadConfig(configPath)
           let runtimeConfig: SandboxRuntimeConfig
           switch (loaded.kind) {

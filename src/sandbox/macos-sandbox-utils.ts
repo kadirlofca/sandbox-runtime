@@ -17,6 +17,7 @@ import {
   isStrictlyUnder as isPathStrictlyUnder,
   DANGEROUS_FILES,
   getDangerousDirectories,
+  getSettingsDenyPaths,
 } from './sandbox-utils.js'
 import { shouldIgnoreViolation } from './sandbox-violation-store.js'
 
@@ -123,6 +124,11 @@ export function macGetMandatoryDenyEntries(
   if (!allowGitConfig) {
     entries.push(literal('.git/config'))
     entries.push(beneathCwd('**/.git/config'))
+  }
+
+  // Absolute paths that must always be write-denied (e.g. ~/.srt-settings.json)
+  for (const absPath of getSettingsDenyPaths()) {
+    entries.push(toLiteralPathEntry(absPath))
   }
 
   return entries

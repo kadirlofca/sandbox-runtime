@@ -22,6 +22,7 @@ import {
   isAtOrUnder,
   isStrictlyUnder,
   getDangerousDirectories,
+  getSettingsDenyPaths,
 } from './sandbox-utils.js'
 import type {
   FsReadRestrictionConfig,
@@ -271,9 +272,10 @@ function findFirstNonExistentComponent(targetPath: string): string {
 }
 
 /**
- * The part of the mandatory deny set that follows from the cwd alone: the
- * dangerous files and directories resolved against it, plus `.git/hooks` and
- * (unless the caller allows git config) `.git/config`.
+ * The part of the mandatory deny set that does NOT require a ripgrep scan:
+ * dangerous files and directories resolved against the cwd, plus `.git/hooks`
+ * and (unless the caller allows git config) `.git/config`, plus absolute
+ * home-directory paths that are always denied (e.g. `~/.srt-settings.json`).
  * {@link linuxGetMandatoryDenyPaths} adds the nested matches its ripgrep scan
  * finds on top of these. Split out so a consumer that must not scan — the
  * violation monitor, which needs the same denies to judge a write bwrap
@@ -283,12 +285,13 @@ export function linuxGetCwdMandatoryDenyPaths(
   allowGitConfig = false,
 ): string[] {
   const cwd = process.cwd()
-  // Note: Settings files are added at the callsite in sandbox-manager.ts
   const denyPaths = [
     // Dangerous files in CWD
     ...DANGEROUS_FILES.map(f => path.resolve(cwd, f)),
     // Dangerous directories in CWD
     ...getDangerousDirectories().map(d => path.resolve(cwd, d)),
+    // Absolute paths always denied (e.g. ~/.srt-settings.json)
+    ...getSettingsDenyPaths(),
   ]
 
   // Git hooks and config are only denied when .git exists as a directory.

@@ -39,6 +39,29 @@ export function getDangerousDirectories(): string[] {
   ]
 }
 
+let _customSettingsPath: string | undefined
+
+/**
+ * Call once at startup when --settings points to a non-default path so
+ * that file is also covered by the mandatory write-deny.
+ */
+export function setCustomSettingsPath(p: string): void {
+  _customSettingsPath = path.resolve(p)
+}
+
+/**
+ * Returns absolute paths that must always be write-denied regardless of user config.
+ * Includes the default settings file and any custom path supplied via --settings.
+ */
+export function getSettingsDenyPaths(): string[] {
+  const defaultPath = path.join(homedir(), '.srt-settings.json')
+  const paths = [defaultPath]
+  if (_customSettingsPath && _customSettingsPath !== defaultPath) {
+    paths.push(_customSettingsPath)
+  }
+  return paths
+}
+
 /**
  * Normalizes a path for case-insensitive comparison.
  * This prevents bypassing security checks using mixed-case paths on case-insensitive
