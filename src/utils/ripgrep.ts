@@ -1,3 +1,4 @@
+import { resolveSystemBinary } from './which.js'
 import { spawn } from 'child_process'
 import { text } from 'node:stream/consumers'
 
@@ -25,7 +26,10 @@ export async function ripGrep(
 ): Promise<string[]> {
   const { command, args: commandArgs = [], argv0 } = config
 
-  const child = spawn(command, [...commandArgs, ...args, target], {
+  // A bare `rg` is looked up in system directories first: PATH may hold a
+  // binary a sandboxed command planted, and this runs outside the sandbox.
+  const exe = command === 'rg' ? resolveSystemBinary('rg') : command
+  const child = spawn(exe, [...commandArgs, ...args, target], {
     argv0,
     signal: abortSignal,
     timeout: 10_000,

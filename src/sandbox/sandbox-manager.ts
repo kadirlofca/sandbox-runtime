@@ -1,3 +1,4 @@
+import * as path from 'path'
 import { createHttpProxyServer } from './http-proxy.js'
 import { createSocksProxyServer } from './socks-proxy.js'
 import type { SocksProxyWrapper } from './socks-proxy.js'
@@ -89,6 +90,7 @@ import {
   decodeSandboxedCommand,
   encodeSandboxedCommand,
   getSettingsDenyPaths,
+  setGitProtection,
 } from './sandbox-utils.js'
 import {
   SandboxViolationStore,
@@ -386,6 +388,13 @@ async function filterNetworkRequest(
     }
   }
 
+  // Without an allowlist nothing restricts the destination: only the deny
+  // list applies, and a host it does not name is allowed.
+  if (config.network.allowedDomains === undefined) {
+    logForDebugging(`No allowlist and not denied, allowing: ${host}:${port}`)
+    return true
+  }
+
   // No matching rules - ask user or deny. strictAllowlist makes the
   // allowlist deterministic enforcement: never fall through to the callback.
   if (!sandboxAskCallback || config.network.strictAllowlist) {
@@ -644,6 +653,7 @@ async function initialize(
 
   // Store config for use by other functions
   config = runtimeConfig
+  setGitProtection(config?.filesystem?.protectGit ?? false)
 
   // Resolve parent/upstream proxy from config or HTTP_PROXY env before we
   // start our own listeners (which will later shadow those vars in the child).
@@ -1286,6 +1296,46 @@ function resolveReadPathEntries(
  * real paths. macOS subpath matching is recursive, so the strip is harmless
  * there and the filter never fires.
  */
+/**
+ * With `allowWrite` omitted every path is writable, so a `denyRead` entry
+ * would still let the sandbox append to or replace what it cannot read (an
+ * unreadable `~/.ssh` stays a place to plant `authorized_keys`). Those
+ * literal entries are therefore also write-denied. An entry is left out when
+ * the cwd or an `allowRead` carve-out lies inside it: denying writes there
+ * would take away the project itself.
+ */
+function implicitWriteDenyFromReadDeny(
+  rawAllowWrite: readonly string[] | undefined,
+  denyRead: readonly string[],
+  allowRead: readonly string[] | undefined,
+  credentialDenyRead: readonly string[] = [],
+): string[] {
+  if (rawAllowWrite !== undefined) return []
+  const inside = (child: string, parent: string): boolean => {
+    const rel = path.relative(parent, child)
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  }
+  const cwd = normalizePathForSandbox(process.cwd(), { literal: true })
+  const carveOuts = (allowRead ?? []).map(p => normalizePathForSandbox(p))
+  // A pattern is judged by the directory its literal prefix names.
+  const anchorOf = (p: string): string => {
+    if (!containsGlobChars(p))
+      return normalizePathForSandbox(p, { literal: true })
+    const at = p.search(/[*?[]/)
+    const prefix = p.slice(0, at)
+    return normalizePathForSandbox(
+      prefix.endsWith('/') ? prefix : path.dirname(prefix),
+      { literal: true },
+    )
+  }
+  return [...denyRead, ...credentialDenyRead]
+    .filter(p => {
+      const anchor = anchorOf(p)
+      return !inside(cwd, anchor) && !carveOuts.some(a => inside(a, anchor))
+    })
+    .map(p => (containsGlobChars(p) ? normalizePathForSandbox(p) : anchorOf(p)))
+}
+
 function stripWriteGlobs(paths: readonly string[]): string[] {
   return paths
     .map(p => removeTrailingGlobSuffix(p))
@@ -1356,7 +1406,17 @@ function getFsWriteConfig(): FsWriteRestrictionConfig {
   }
 
   const allowPaths = stripWriteGlobs(config.filesystem.allowWrite ?? ['/'])
-  const denyPaths = stripWriteGlobs(config.filesystem.denyWrite)
+  const denyPaths = [
+    ...stripWriteGlobs(config.filesystem.denyWrite),
+    ...stripWriteGlobs(
+      implicitWriteDenyFromReadDeny(
+        config.filesystem.allowWrite,
+        config.filesystem.denyRead,
+        config.filesystem.allowRead,
+        getCredentialDenyReadPaths(config.credentials),
+      ),
+    ),
+  ]
 
   const allowOnly = [
     ...defaultWritePathsUnder({
@@ -1528,8 +1588,30 @@ function getAllowAllUnixSockets(): boolean | undefined {
   return config?.network?.allowAllUnixSockets
 }
 
+// Permissive by default: with no allowedDomains nothing local was denied, so
+// loopback bind/connect stay open (dev servers, OAuth callbacks). An explicit
+// value always wins.
 function getAllowLocalBinding(): boolean | undefined {
-  return config?.network?.allowLocalBinding
+  const explicit = config?.network?.allowLocalBinding
+  if (explicit !== undefined) return explicit
+  const net = config?.network
+  if (net?.allowedDomains !== undefined) return undefined
+  // A deny entry that names loopback must not be undone by opening it up.
+  const deniesLoopback = (net?.deniedDomains ?? []).some(d => {
+    const host = d
+      .replace(/^\[?([^\]]*)\]?(:\d+)?$/, '$1')
+      .replace(/:\d+$/, '')
+      .toLowerCase()
+    return (
+      host === '*' ||
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.startsWith('127.')
+    )
+  })
+  return deniesLoopback ? undefined : true
 }
 
 function getAllowMachLookup(): string[] | undefined {
@@ -1705,11 +1787,23 @@ async function wrapWithSandbox(
         }),
         ...userAllowWrite,
       ],
-      denyWithinAllow: stripWriteGlobs(
-        customConfig?.filesystem?.denyWrite ??
-          config?.filesystem.denyWrite ??
-          [],
-      ),
+      denyWithinAllow: [
+        ...stripWriteGlobs(
+          customConfig?.filesystem?.denyWrite ??
+            config?.filesystem.denyWrite ??
+            [],
+        ),
+        ...stripWriteGlobs(
+          implicitWriteDenyFromReadDeny(
+            rawAllowWrite,
+            customConfig?.filesystem?.denyRead ??
+              config?.filesystem.denyRead ??
+              [],
+            customConfig?.filesystem?.allowRead ?? config?.filesystem.allowRead,
+            credentialRestrictions.denyReadPaths,
+          ),
+        ),
+      ],
     }
 
     // Credential deny paths are unioned with the caller's denyRead — never
@@ -2080,6 +2174,7 @@ function updateConfig(newConfig: SandboxRuntimeConfig): void {
   // a function reference is immutable in the sense that matters here.
   const { filterRequest, ...rest } = newConfig.network
   config = structuredClone({ ...newConfig, network: rest })
+  setGitProtection(config?.filesystem?.protectGit ?? false)
   config.network.filterRequest = filterRequest
   resolvedAddressGuard = nextGuard
   // Re-resolve parent proxy so hot-reload picks up changes. Note: the proxy
@@ -2217,6 +2312,8 @@ function forceCloseHttpServer(
 }
 
 async function reset(): Promise<void> {
+  // Back to the library default; initialize()/updateConfig() set it from config.
+  setGitProtection(true)
   // Windows: release this session's sandbox-user ACEs. Best-effort
   // — log anomalies rather than throw, so teardown always
   // completes. Leftover ACEs are recoverable later via

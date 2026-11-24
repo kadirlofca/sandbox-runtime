@@ -1,6 +1,7 @@
 import { homedir } from 'os'
 import * as path from 'path'
 import * as fs from 'fs'
+import { fileURLToPath } from 'url'
 import { getPlatform } from '../utils/platform.js'
 import { logForDebugging } from '../utils/debug.js'
 
@@ -19,6 +20,36 @@ export const DANGEROUS_FILES = [
   '.ripgreprc',
   '.mcp.json',
 ] as const
+
+let _gitProtection = true
+
+/**
+ * Git protection on/off. When on, everything that lets a write to git
+ * metadata run code outside the sandbox is write-denied: `.git/hooks`,
+ * `.git/config`, submodule and worktree git dirs, `core.hooksPath`
+ * directories, `.gitmodules`, and the global git config. When off, git works
+ * normally (init, clone, config, hooks). The library default is on; the
+ * SandboxManager sets it from `filesystem.protectGit`, which defaults to off.
+ */
+export function setGitProtection(on: boolean): void {
+  _gitProtection = on
+}
+
+export function isGitProtected(): boolean {
+  return _gitProtection
+}
+
+const GIT_PROTECTED_FILES: ReadonlySet<string> = new Set([
+  '.gitconfig',
+  '.gitmodules',
+])
+
+/** {@link DANGEROUS_FILES} minus the git ones when git protection is off. */
+export function getDangerousFiles(): string[] {
+  return DANGEROUS_FILES.filter(
+    f => _gitProtection || !GIT_PROTECTED_FILES.has(f),
+  )
+}
 
 /**
  * Dangerous directories that should be protected from writes.
@@ -58,6 +89,322 @@ export function setCustomSettingsPath(p: string): void {
  */
 export function getSettingsDenyPaths(): string[] {
   return _registeredSettingsPath ? [_registeredSettingsPath] : []
+}
+
+/**
+ * Home-relative files and directories that run code, or choose what runs,
+ * without the user invoking anything: shell startup files, login/launch
+ * agents, ssh server hooks, git config. A write to any of them is a sandbox
+ * escape, so they stay write-denied however permissive the write config is.
+ */
+const HOME_ESCAPE_VECTORS = [
+  '.zshenv',
+  '.zshrc',
+  '.zprofile',
+  '.zlogin',
+  '.zlogout',
+  '.bashrc',
+  '.bash_profile',
+  '.bash_login',
+  '.bash_logout',
+  '.profile',
+  '.gitconfig',
+  '.config/git/config',
+  '.config/fish/config.fish',
+  '.config/fish/conf.d',
+  '.config/fish/functions',
+  '.ssh/authorized_keys',
+  '.ssh/authorized_keys2',
+  '.ssh/config',
+  '.ssh/rc',
+  '.ssh/environment',
+  'Library/LaunchAgents',
+  '.config/systemd/user',
+  '.config/autostart',
+  '.config/environment.d',
+  '.srt-settings.json',
+] as const
+
+function insidePath(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+function realpathOrSelf(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+/**
+ * Directories from `cwd` upward that hold a `.git` directory. A command run
+ * from `repo/sub` still works on `repo/.git`, so its hooks and config need the
+ * same protection as the cwd's own.
+ */
+export function enclosingGitRoots(cwd: string): string[] {
+  const roots: string[] = []
+  let dir = cwd
+  for (;;) {
+    try {
+      if (fs.statSync(path.join(dir, '.git')).isDirectory()) roots.push(dir)
+    } catch {
+      // no .git here
+    }
+    const up = path.dirname(dir)
+    if (up === dir) break
+    dir = up
+  }
+  return roots
+}
+
+/**
+ * Directories git runs hooks from when `core.hooksPath` points away from
+ * `.git/hooks` (husky, lefthook, a shared ~/.githooks). Hook scripts there run
+ * outside the sandbox on the next commit, exactly like `.git/hooks`, so they
+ * are guarded the same way. Read from the repo's own config (itself
+ * write-denied) and from the user's global git config.
+ */
+export function getConfiguredHooksPaths(cwd: string): string[] {
+  const home = homedir()
+  const sources: Array<{ file: string; base: string }> = [
+    { file: path.join(cwd, '.git', 'config'), base: cwd },
+    { file: path.join(home, '.gitconfig'), base: home },
+    { file: path.join(home, '.config', 'git', 'config'), base: home },
+  ]
+  const out: string[] = []
+  for (const { file, base } of sources) {
+    let text: string
+    try {
+      text = fs.readFileSync(file, 'utf8')
+    } catch {
+      continue
+    }
+    for (const m of text.matchAll(/^\s*hooksPath\s*=\s*(.+?)\s*$/gim)) {
+      const raw = m[1].replace(/^"(.*)"$/, '$1')
+      if (!raw) continue
+      const expanded = raw.startsWith('~/')
+        ? path.join(home, raw.slice(2))
+        : raw
+      out.push(path.resolve(base, expanded))
+    }
+  }
+  return [...new Set(out)]
+}
+
+/**
+ * Unix sockets whose peers run commands as the user outside the sandbox
+ * (container daemons). Only the ones that exist are listed.
+ */
+export function getEscapeUnixSockets(): string[] {
+  const home = homedir()
+  return [
+    '/var/run/docker.sock',
+    '/var/run/podman/podman.sock',
+    path.join(home, '.docker/run/docker.sock'),
+    path.join(home, '.colima/default/docker.sock'),
+    path.join(home, '.colima/docker.sock'),
+    path.join(home, '.orbstack/run/docker.sock'),
+    path.join(home, '.rd/docker.sock'),
+    path.join(home, '.lima/default/sock/docker.sock'),
+  ]
+}
+
+/**
+ * Shell startup files that also have variants zsh prefers or sources:
+ * `.zshrc.zwc` runs instead of `.zshrc`, `.zcompdump*` is sourced by compinit.
+ * Matched by prefix (macOS only; Linux cannot mount a pattern).
+ */
+export const HOME_ESCAPE_PREFIXES = [
+  '.zshenv',
+  '.zshrc',
+  '.zprofile',
+  '.zlogin',
+  '.zlogout',
+  '.zcompdump',
+] as const
+
+const EXTRA_HOME_ESCAPE_VECTORS = ['.bash_aliases', '.zsh_sessions'] as const
+
+/** Always guarded, in case the derivation below finds nothing. */
+const BASELINE_LAUNCHER_NAMES = ['node', 'bun', 'srt'] as const
+
+/**
+ * The interpreter a script's `#!` line asks for: the program itself, or for
+ * `#!/usr/bin/env [-S] [-i] NAME` the NAME that env looks up through PATH.
+ */
+function shebangInterpreter(script: string): string | undefined {
+  try {
+    const fd = fs.openSync(script, 'r')
+    try {
+      const buf = Buffer.alloc(256)
+      const n = fs.readSync(fd, buf, 0, buf.length, 0)
+      const first = buf.toString('utf8', 0, n).split('\n')[0]
+      if (!first.startsWith('#!')) return undefined
+      const [prog, ...rest] = first.slice(2).trim().split(/\s+/)
+      if (!prog) return undefined
+      if (path.basename(prog) !== 'env') return path.basename(prog)
+      return rest.find(a => !a.startsWith('-') && !a.includes('='))
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Names the srt launcher resolves through PATH after the sandbox has run:
+ * the runtime executable, the name srt was started under, and the script's
+ * shebang interpreter — whatever runtime or wrapper the user actually uses.
+ */
+function launcherNames(): string[] {
+  const names = new Set<string>(BASELINE_LAUNCHER_NAMES)
+  const add = (p: string | undefined): void => {
+    if (p) names.add(path.basename(p))
+  }
+  add(process.execPath)
+  add(process.argv0)
+  add(process.argv[1])
+  if (process.argv[1]) {
+    add(realpathOrSelf(process.argv[1]))
+    add(shebangInterpreter(realpathOrSelf(process.argv[1])))
+  }
+  names.delete('')
+  return [...names]
+}
+
+/**
+ * The names the launcher and runtime are found under in PATH, and every
+ * earlier PATH directory: a file planted under one of those names in a
+ * user-writable directory that precedes the real one is what the next
+ * `#!/usr/bin/env node` (or `srt`) would run, outside the sandbox.
+ */
+function launcherPathVectors(): string[] {
+  const dirs = (process.env.PATH ?? '')
+    .split(path.delimiter)
+    .filter(d => path.isAbsolute(d))
+  const out: string[] = []
+  for (const name of launcherNames()) {
+    const seen: string[] = []
+    for (const dir of dirs) {
+      const candidate = path.join(dir, name)
+      seen.push(candidate)
+      try {
+        fs.lstatSync(candidate)
+      } catch {
+        continue
+      }
+      out.push(...seen)
+      break
+    }
+  }
+  return out
+}
+
+/**
+ * Directories of the runtime dependencies srt loads, found the way node finds
+ * them (nearest node_modules walking up). With srt installed as a dependency
+ * they sit beside it, outside the package directory, so guarding the package
+ * alone would leave `node_modules/<dep>` replaceable.
+ */
+function dependencyDirs(root: string): string[] {
+  const found = new Set<string>()
+  const seen = new Set<string>()
+  const visit = (pkgDir: string, depth: number): void => {
+    if (depth > 8 || seen.has(pkgDir)) return
+    seen.add(pkgDir)
+    let names: string[]
+    try {
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'),
+      ) as { dependencies?: Record<string, string> }
+      names = Object.keys(manifest.dependencies ?? {})
+    } catch {
+      return
+    }
+    for (const name of names) {
+      let dir = pkgDir
+      for (;;) {
+        const candidate = path.join(dir, 'node_modules', name)
+        if (fs.existsSync(path.join(candidate, 'package.json'))) {
+          const real = realpathOrSelf(candidate)
+          found.add(real)
+          visit(real, depth + 1)
+          break
+        }
+        const up = path.dirname(dir)
+        if (up === dir) break
+        dir = up
+      }
+    }
+  }
+  visit(root, 0)
+  return [...found]
+}
+
+/**
+ * srt's own package directory and its runtime dependencies. A source checkout
+ * (it has a .git) is developed in place, so it is exempt while the cwd is
+ * inside it; an installed package never is.
+ */
+function installVectors(cwd: string): string[] {
+  let root: string
+  try {
+    root = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+    )
+  } catch {
+    return []
+  }
+  root = realpathOrSelf(root)
+  if (fs.existsSync(path.join(root, '.git')) && insidePath(cwd, root)) return []
+  return [root, ...dependencyDirs(root).filter(d => !insidePath(d, root))]
+}
+
+/**
+ * Absolute paths that are always write-denied, independent of user config:
+ * what runs code outside the sandbox without the user invoking anything —
+ * shell startup files, launch agents, ssh/git config — plus srt's own install,
+ * the runtime and launcher binaries and the PATH slots that shadow them.
+ * Code that escapes this way can reach everything the config denies.
+ *
+ * With `existingOnly`, paths that do not exist are left out — for backends
+ * that would otherwise create an empty file or directory as a mount point.
+ */
+export function getEscapeVectorDenyPaths(existingOnly = false): string[] {
+  const home = homedir()
+  const out = [...HOME_ESCAPE_VECTORS, ...EXTRA_HOME_ESCAPE_VECTORS]
+    .filter(
+      rel =>
+        _gitProtection ||
+        (rel !== '.gitconfig' && rel !== '.config/git/config'),
+    )
+    .map(rel => path.join(home, rel))
+
+  const cwd = realpathOrSelf(process.cwd())
+  const guarded = [...installVectors(cwd)]
+  if (process.execPath) guarded.push(process.execPath)
+  if (process.argv[1]) guarded.push(process.argv[1])
+  out.push(...guarded.map(realpathOrSelf))
+  // The symlink spellings themselves (/opt/homebrew/bin/node -> Cellar/...):
+  // replacing the link redirects the launcher without touching its target.
+  out.push(...launcherPathVectors())
+
+  const unique = [...new Set(out)]
+  return existingOnly
+    ? unique.filter(p => {
+        try {
+          fs.lstatSync(p)
+          return true
+        } catch {
+          return false
+        }
+      })
+    : unique
 }
 
 /**
@@ -815,6 +1162,13 @@ export function generateProxyEnvVars(
       process.env.CLAUDE_CODE_TMPDIR ||
       process.env.CLAUDE_TMPDIR ||
       '/tmp/claude'
+    // Nothing else creates it for a generic (non-Claude) user, and tools
+    // that honour TMPDIR then fail with ENOENT.
+    try {
+      fs.mkdirSync(tmpdir, { recursive: true, mode: 0o700 })
+    } catch {
+      // unwritable parent: leave it to the sandboxed tool to report
+    }
     envVars.push(`TMPDIR=${tmpdir}`)
   }
 

@@ -928,7 +928,17 @@ export const FilesystemConfigSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      'Allow writes to .git/config files (default: false). Enables git remote URL updates while keeping .git/hooks protected.',
+      'Allow writes to .git/config files when protectGit is on (default: false). Enables git remote URL updates while keeping .git/hooks protected.',
+    ),
+  protectGit: z
+    .boolean()
+    .optional()
+    .describe(
+      'Write-deny what lets git metadata run code outside the sandbox: .git/hooks, .git/config, ' +
+        'submodule and worktree git dirs, core.hooksPath directories, .gitmodules and the global ' +
+        'git config (default: false). With it off, git works normally — init, clone, config, hooks — ' +
+        'but a sandboxed command can plant a hook or config key that your next unsandboxed git ' +
+        'command runs outside the sandbox.',
     ),
 })
 

@@ -3,8 +3,10 @@ import { writeFileSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { basename, join } from 'path'
 import { ripGrep } from '../../src/utils/ripgrep.js'
+import { whichSync } from '../../src/utils/which.js'
 
-describe('ripGrep', () => {
+// ripGrep is only used on Linux and needs ripgrep installed
+describe.skipIf(!whichSync('rg'))('ripGrep', () => {
   it('finds matches with default config', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rg-test-'))
     try {

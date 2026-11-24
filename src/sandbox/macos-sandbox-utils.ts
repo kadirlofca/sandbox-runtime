@@ -1,6 +1,8 @@
 import { quote } from '../utils/shell-quote.js'
 import { spawn } from 'child_process'
 import * as path from 'path'
+import * as fs from 'fs'
+import { homedir } from 'os'
 import { logForDebugging } from '../utils/debug.js'
 import { whichSync } from '../utils/which.js'
 import { buildJavaToolOptions } from './java-proxy-agent.js'
@@ -15,9 +17,15 @@ import {
   globToRegex,
   denyGlobRegex,
   isStrictlyUnder as isPathStrictlyUnder,
-  DANGEROUS_FILES,
+  getDangerousFiles,
+  isGitProtected,
   getDangerousDirectories,
   getSettingsDenyPaths,
+  getEscapeVectorDenyPaths,
+  HOME_ESCAPE_PREFIXES,
+  getConfiguredHooksPaths,
+  enclosingGitRoots,
+  getEscapeUnixSockets,
 } from './sandbox-utils.js'
 import { shouldIgnoreViolation } from './sandbox-violation-store.js'
 
@@ -105,7 +113,7 @@ export function macGetMandatoryDenyEntries(
     anchoredGlobEntry(cwd, pattern)
 
   // Dangerous files - static paths in CWD + glob patterns for subtree
-  for (const fileName of DANGEROUS_FILES) {
+  for (const fileName of getDangerousFiles()) {
     entries.push(literal(fileName))
     entries.push(beneathCwd(`**/${fileName}`))
   }
@@ -116,19 +124,99 @@ export function macGetMandatoryDenyEntries(
     entries.push(beneathCwd(`**/${dirName}/**`))
   }
 
-  // Git hooks are always blocked for security
-  entries.push(literal('.git/hooks'))
-  entries.push(beneathCwd('**/.git/hooks/**'))
+  if (isGitProtected()) {
+    // Git hooks are always blocked for security
+    entries.push(literal('.git/hooks'))
+    entries.push(beneathCwd('**/.git/hooks/**'))
 
-  // Git config - conditionally blocked based on allowGitConfig setting
-  if (!allowGitConfig) {
-    entries.push(literal('.git/config'))
-    entries.push(beneathCwd('**/.git/config'))
+    // Git config - conditionally blocked based on allowGitConfig setting
+    if (!allowGitConfig) {
+      entries.push(literal('.git/config'))
+      entries.push(beneathCwd('**/.git/config'))
+    }
+
+    // Submodule and worktree git dirs live under .git/modules and
+    // .git/worktrees, where the patterns above (`.git/config`, `.git/hooks`)
+    // do not reach; their config and hooks run code outside the sandbox too.
+    for (const gitSub of ['modules', 'worktrees']) {
+      entries.push(beneathCwd(`**/.git/${gitSub}/**/hooks/**`))
+      if (!allowGitConfig) {
+        entries.push(beneathCwd(`**/.git/${gitSub}/**/config`))
+        entries.push(beneathCwd(`**/.git/${gitSub}/**/config.worktree`))
+      }
+    }
+
+    // Hook directories core.hooksPath points at (husky and the like)
+    for (const hooksDir of getConfiguredHooksPaths(process.cwd())) {
+      const norm = normalizePathForSandbox(hooksDir, { literal: true })
+      entries.push(toLiteralPathEntry(norm))
+      entries.push(
+        anchoredGlobEntry(
+          normalizePathForSandbox(path.dirname(norm), { literal: true }),
+          `${path.basename(norm)}/**`,
+        ),
+      )
+    }
+
+    // The same, for repositories that enclose the cwd (running from repo/sub)
+    for (const root of enclosingGitRoots(process.cwd())) {
+      if (root === process.cwd()) continue
+      const base = normalizePathForSandbox(root, { literal: true })
+      const at = (pattern: string): PathEntry =>
+        anchoredGlobEntry(base, pattern)
+      entries.push(toLiteralPathEntry(path.join(base, '.git/hooks')))
+      entries.push(at('.git/hooks/**'))
+      for (const gitSub of ['modules', 'worktrees']) {
+        entries.push(at(`.git/${gitSub}/**/hooks/**`))
+        if (!allowGitConfig) {
+          entries.push(at(`.git/${gitSub}/**/config`))
+          entries.push(at(`.git/${gitSub}/**/config.worktree`))
+        }
+      }
+      if (!allowGitConfig)
+        entries.push(toLiteralPathEntry(path.join(base, '.git/config')))
+      for (const hooksDir of getConfiguredHooksPaths(root)) {
+        entries.push(
+          toLiteralPathEntry(
+            normalizePathForSandbox(hooksDir, { literal: true }),
+          ),
+        )
+      }
+    }
+  }
+
+  // Container-daemon sockets: write-denying the socket makes its directories
+  // unmovable, so the path-literal connect deny cannot be dodged by renaming
+  // a parent directory.
+  for (const socketPath of getEscapeUnixSockets()) {
+    try {
+      fs.lstatSync(socketPath)
+      entries.push(toLiteralPathEntry(socketPath))
+    } catch {
+      // not present
+    }
   }
 
   // Absolute paths that must always be write-denied (e.g. ~/.srt-settings.json)
   for (const absPath of getSettingsDenyPaths()) {
     entries.push(toLiteralPathEntry(absPath))
+  }
+
+  // Home escape vectors, srt's own install and the runtime binary
+  // The anchored patterns also cover creating a path that does not exist yet,
+  // which a bare literal entry leaves open under a permissive write root.
+  for (const absPath of getEscapeVectorDenyPaths()) {
+    const dir = normalizePathForSandbox(path.dirname(absPath), {
+      literal: true,
+    })
+    const name = path.basename(absPath)
+    entries.push(toLiteralPathEntry(absPath))
+    entries.push(anchoredGlobEntry(dir, name))
+    entries.push(anchoredGlobEntry(dir, `${name}/**`))
+  }
+  const home = normalizePathForSandbox(homedir(), { literal: true })
+  for (const prefix of HOME_ESCAPE_PREFIXES) {
+    entries.push(anchoredGlobEntry(home, `${prefix}*`))
   }
 
   return entries
@@ -1104,6 +1192,10 @@ function generateSandboxProfile({
     '  (sysctl-name "machdep.cpu.brand_string")',
     '  (sysctl-name "machdep.ptrauth_enabled")',
     '  (sysctl-name "security.mac.lockdown_mode_state")',
+    // Without this the Security framework refuses every keychain modify/add
+    // ("UNIX[Operation not permitted]"), so a login or token refresh made
+    // inside the sandbox is never persisted. Reads are unaffected.
+    '  (sysctl-name "security.mac.sandbox.sentinel")',
     '  (sysctl-name "sysctl.proc_cputype")',
     '  (sysctl-name "vm.loadavg")',
     '  (sysctl-name-prefix "hw.optional.arm")',
@@ -1149,6 +1241,27 @@ function generateSandboxProfile({
   profile.push('; Network')
   if (!needsNetworkRestriction) {
     profile.push('(allow network*)')
+    // Permissive network still must not reach the sockets that hand out code
+    // execution outside the sandbox (container daemons, tmux). Listing a
+    // socket in allowUnixSockets, or allowAllUnixSockets, opts back in.
+    if (!allowAllUnixSockets) {
+      const allowed = new Set(
+        (allowUnixSockets ?? []).map(p =>
+          normalizePathForSandbox(p, { literal: true }),
+        ),
+      )
+      for (const socketPath of getEscapeUnixSockets().map(p =>
+        normalizePathForSandbox(p, { literal: true }),
+      )) {
+        if (allowed.has(socketPath)) continue
+        profile.push(
+          `(deny network-outbound (remote unix-socket (path-literal ${escapePath(socketPath)})))`,
+        )
+      }
+      profile.push(
+        '(deny network-outbound (remote unix-socket (path-regex #"^/private/tmp/tmux-[0-9]+/")))',
+      )
+    }
   } else {
     // Allow local binding if requested.
     //
@@ -1477,7 +1590,7 @@ export function wrapCommandWithSandboxMacOS(
   // Use `env` command to set environment variables - each VAR=value is a separate
   // argument that quote() escapes properly, avoiding shell quoting issues
   const wrappedCommand = quote([
-    'env',
+    '/usr/bin/env',
     ...unsetEnvArgs,
     ...setEnvArgs,
     ...proxyEnvArgs,
@@ -1529,7 +1642,7 @@ export function startMacOSSandboxLogMonitor(
 
   // Stream and filter kernel logs for all sandbox violations
   // We can't filter by specific logTag since it's dynamic per command
-  const logProcess = spawn('log', [
+  const logProcess = spawn('/usr/bin/log', [
     'stream',
     '--predicate',
     `(eventMessage ENDSWITH "${sessionSuffix}")`,

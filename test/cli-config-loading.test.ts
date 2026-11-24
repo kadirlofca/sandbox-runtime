@@ -54,8 +54,15 @@ describe('loadConfig', () => {
   })
 
   it('should report invalid and name the failing keys for a schema mismatch', () => {
-    // Valid JSON but missing required fields
-    fs.writeFileSync(configPath, JSON.stringify({ network: {} }))
+    // Valid JSON, but allowedDomains has the wrong type (network {} is valid
+    // now that allowedDomains is optional)
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        network: { allowedDomains: 'x' },
+        filesystem: { denyRead: [], denyWrite: [] },
+      }),
+    )
 
     const result = loadConfig(configPath)
 

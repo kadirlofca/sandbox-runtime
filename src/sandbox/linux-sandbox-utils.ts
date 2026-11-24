@@ -1,6 +1,6 @@
 import { quote } from '../utils/shell-quote.js'
 import { logForDebugging } from '../utils/debug.js'
-import { whichSync } from '../utils/which.js'
+import { whichSync, resolveSystemBinary } from '../utils/which.js'
 import { randomBytes } from 'node:crypto'
 import * as fs from 'fs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -17,12 +17,16 @@ import {
   isSymlinkOutsideBoundary,
   encodeSandboxedCommand,
   attributionKeyFor,
-  DANGEROUS_FILES,
+  getDangerousFiles,
+  isGitProtected,
   isAbsenceErrno,
   isAtOrUnder,
   isStrictlyUnder,
   getDangerousDirectories,
   getSettingsDenyPaths,
+  getEscapeVectorDenyPaths,
+  getConfiguredHooksPaths,
+  enclosingGitRoots,
 } from './sandbox-utils.js'
 import type {
   FsReadRestrictionConfig,
@@ -287,7 +291,7 @@ export function linuxGetCwdMandatoryDenyPaths(
   const cwd = process.cwd()
   const denyPaths = [
     // Dangerous files in CWD
-    ...DANGEROUS_FILES.map(f => path.resolve(cwd, f)),
+    ...getDangerousFiles().map(f => path.resolve(cwd, f)),
     // Dangerous directories in CWD
     ...getDangerousDirectories().map(d => path.resolve(cwd, d)),
     // Absolute paths always denied (e.g. ~/.srt-settings.json).
@@ -296,6 +300,18 @@ export function linuxGetCwdMandatoryDenyPaths(
     // and config-loader detects that stub via isStaleBwrapMountPoint and treats
     // it as missing rather than refusing with 'empty'.
     ...getSettingsDenyPaths(),
+    // Home escape vectors, srt's own install and the runtime binary. Only
+    // existing ones: a missing path would be created as an empty mount point.
+    ...getEscapeVectorDenyPaths(true),
+    // Hook directories core.hooksPath points at (husky and the like)
+    ...(isGitProtected() ? getConfiguredHooksPaths(cwd) : []).filter(p => {
+      try {
+        fs.lstatSync(p)
+        return true
+      } catch {
+        return false
+      }
+    }),
   ]
 
   // Git hooks and config are only denied when .git exists as a directory.
@@ -311,7 +327,16 @@ export function linuxGetCwdMandatoryDenyPaths(
     // .git doesn't exist
   }
 
-  if (dotGitIsDirectory) {
+  if (isGitProtected()) {
+    // Repositories that enclose the cwd (running from repo/sub)
+    for (const root of enclosingGitRoots(cwd)) {
+      if (root === cwd) continue
+      denyPaths.push(path.join(root, '.git', 'hooks'))
+      if (!allowGitConfig) denyPaths.push(path.join(root, '.git', 'config'))
+    }
+  }
+
+  if (dotGitIsDirectory && isGitProtected()) {
     // Git hooks always blocked for security
     denyPaths.push(path.resolve(cwd, '.git/hooks'))
 
@@ -345,18 +370,30 @@ async function linuxGetMandatoryDenyPaths(
 
   // Build iglob args for all patterns in one ripgrep call
   const iglobArgs: string[] = []
-  for (const fileName of DANGEROUS_FILES) {
+  for (const fileName of getDangerousFiles()) {
     iglobArgs.push('--iglob', fileName)
   }
   for (const dirName of dangerousDirectories) {
     iglobArgs.push('--iglob', `**/${dirName}/**`)
   }
-  // Git hooks always blocked in nested repos
-  iglobArgs.push('--iglob', '**/.git/hooks/**')
+  if (isGitProtected()) {
+    // Git hooks always blocked in nested repos
+    iglobArgs.push('--iglob', '**/.git/hooks/**')
 
-  // Git config conditionally blocked in nested repos
-  if (!allowGitConfig) {
-    iglobArgs.push('--iglob', '**/.git/config')
+    // Git config conditionally blocked in nested repos
+    if (!allowGitConfig) {
+      iglobArgs.push('--iglob', '**/.git/config')
+    }
+  }
+
+  // Submodule and worktree git dirs: their config and hooks run code
+  // outside the sandbox just like the top-level ones.
+  for (const gitSub of isGitProtected() ? ['modules', 'worktrees'] : []) {
+    iglobArgs.push('--iglob', `**/.git/${gitSub}/**/hooks/**`)
+    if (!allowGitConfig) {
+      iglobArgs.push('--iglob', `**/.git/${gitSub}/**/config`)
+      iglobArgs.push('--iglob', `**/.git/${gitSub}/**/config.worktree`)
+    }
   }
 
   // Single ripgrep call to find all dangerous paths in subdirectories
@@ -385,6 +422,17 @@ async function linuxGetMandatoryDenyPaths(
   // Process matches
   for (const match of matches) {
     const absolutePath = path.resolve(cwd, match)
+
+    // Submodule / worktree git dir: the hooks directory, or the config file
+    if (/\/\.git\/(modules|worktrees)\//.test(absolutePath)) {
+      const hooksAt = absolutePath.indexOf('/hooks/')
+      denyPaths.push(
+        hooksAt !== -1
+          ? absolutePath.slice(0, hooksAt + '/hooks'.length)
+          : absolutePath,
+      )
+      continue
+    }
 
     // File inside a dangerous directory -> add the directory path
     let foundDir = false
@@ -1191,7 +1239,7 @@ export async function initializeLinuxNetworkBridge(
   socksProxyPort: number,
   socatPath?: string,
 ): Promise<LinuxNetworkBridgeContext> {
-  const socat = socatPath ?? 'socat'
+  const socat = socatPath ?? resolveSystemBinary('socat')
   const socketId = randomBytes(8).toString('hex')
   const httpSocketPath = join(tmpdir(), `claude-http-${socketId}.sock`)
   // Only allocated when ports differ; in the mux case the SOCKS side
@@ -3290,7 +3338,7 @@ export async function wrapCommandWithSandboxLinux(
     }
 
     const wrappedCommand = renderBwrapInvocation(
-      bwrapPath ?? 'bwrap',
+      bwrapPath ?? resolveSystemBinary('bwrap'),
       bwrapArgs,
       mounts,
     )

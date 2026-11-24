@@ -144,7 +144,7 @@ Both filesystem and network isolation are required for effective sandboxing. Wit
 - **Read** (deny-then-allow pattern): By default, read access is allowed everywhere. You can deny broad regions (e.g., `/Users`) and then re-allow specific paths within them (e.g., `.`). `allowRead` takes precedence over `denyRead` — the opposite of write, where `denyWrite` takes precedence over `allowWrite`. A `denyRead` entry that is more specific than the `allowRead` region it falls inside (e.g. `denyRead: ["**/.env"]` or `["./secrets"]` with `allowRead: ["."]`) still stays denied.
 - **Write** (allow-only pattern): By default, write access is denied everywhere. You must explicitly allow paths (e.g., `.`, `/tmp`). An empty allow list means no write access.
 
-**Network Isolation** (allow-only pattern): By default, all network access is denied. You must explicitly allow domains. An empty allowedDomains list means no network access. Network traffic is routed through proxy servers running on the host:
+**Network Isolation** (permissive by default): with no `allowedDomains`, all hosts are reachable except those named in `deniedDomains`. Setting `allowedDomains` switches to allow-only: only listed domains work, and an empty list means no network access. Network traffic is routed through proxy servers running on the host:
 
 - **Linux**: Requests are routed via the filesystem over a Unix domain socket. The network namespace of the sandboxed process is removed entirely, so all network traffic must go through the proxies running on the host (listening on Unix sockets that are bind-mounted into the sandbox)
 
@@ -381,7 +381,7 @@ srt --settings /path/to/srt-settings.json <command>
 
 #### Network Configuration
 
-Uses an **allow-only pattern** - all network access is denied by default.
+Permissive by default: with `allowedDomains` unset, only `deniedDomains` restricts (a host the deny list does not name is allowed). Setting `allowedDomains` makes it allow-only, and an empty list means no network access. With `allowedDomains` unset, loopback binding and connecting default to allowed unless a `deniedDomains` entry names loopback.
 
 - `network.allowedDomains` - Array of allowed domains (supports wildcards like `*.example.com`). Empty array = no network access. An optional `:port` suffix (`api.example.com:443`, `*.example.com:8443`) restricts an entry to that destination port; entries without a port match any port.
   - IPv6 literals must be bracketed, RFC 3986-style: `[::1]`, `[2001:db8::1]:443`. An unbracketed multi-colon entry is rejected as ambiguous (`2001:db8::1:443` is itself a valid address).
@@ -555,25 +555,17 @@ This denies reading anything under `/Users` (or `/home` on Linux), then re-allow
 
 ### Common Issues and Tips
 
-**macOS Keychain: login succeeds but auth fails with 401**
+**Known limits of the permissive defaults**
+- Naming a domain in `deniedDomains` blocks that name through the proxy, not the IP behind it; add the IPs you care about as `deniedDomains` entries too (see the resolved-address list above). Domain fronting is not covered.
+- With open network, localhost TCP services (a Chrome debug port, Docker's TCP port) are reachable, while Docker's Unix sockets are denied on macOS. Deny a specific loopback port with a `deniedDomains` entry such as `127.0.0.1:2375`.
+- When srt is installed as a dependency of a project, srt and the packages it loads (`zod`, `commander`, `node-forge`, ...) are write-protected, so `rm -rf node_modules` and `npm ci` fail inside the sandbox in that project. Run those outside srt.
+- Files that your shell startup files source (`~/.oh-my-zsh`, `~/.nvm/nvm.sh`, `~/.cargo/env`) and tool config files (`~/.npmrc`, `~/.aws/config`, `~/.docker/config.json`) are writable; add the ones you want protected to `denyWrite`.
 
-On macOS, apps that store credentials in the macOS Keychain via the native `Security.framework` API can fail to authenticate after logging in inside srt. The cause is a keychain ACL restriction: entries created outside the sandbox (by a non-sandboxed process) carry an ACL bound to the creating process's identity. The sandboxed process cannot update those entries — SecurityServer enforces the ACL at the IPC level — so the app reads a stale token from the keychain and gets 401.
+**Git and `protectGit`:** git works normally inside srt by default — `init`, `clone`, `config` (including `--global`), hooks, submodules and worktrees. The cost: git runs hooks and config-defined commands (`core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, aliases, credential helpers) as you, outside the sandbox, so a sandboxed command can plant one that your next unsandboxed `git` runs. Set `filesystem.protectGit: true` to write-deny `.git/hooks`, `.git/config`, submodule and worktree git dirs, `core.hooksPath` directories, `.gitmodules` and the global git config instead; `git init` and `git clone` then fail inside the sandbox, so create repositories outside it.
 
-**Fix:** delete the existing keychain entry, then log in from inside srt. The sandboxed process creates a fresh entry via the `security` CLI, which uses a permissive ACL that any process can update going forward.
+**macOS Keychain: login succeeds but Claude is still unauthenticated**
 
-```bash
-# Find the service name for Claude Code (adjust CLAUDE_CONFIG_DIR if using a custom path):
-node -e '
-const c=require("crypto"),o=require("os"),p=require("path");
-const dir=process.env.CLAUDE_CONFIG_DIR||p.join(o.homedir(),".claude");
-console.log("Claude Code-credentials-"+c.createHash("sha256").update(dir.normalize("NFC")).digest("hex").slice(0,8));
-'
-
-# Delete the restrictive entry:
-security delete-generic-password -a "$USER" -s "<service-name-from-above>"
-```
-
-Then run the login flow from inside srt. This is a one-time step per config directory. This issue is macOS-only.
+The profile allows reading `security.mac.sandbox.sentinel`. Without it the Security framework refuses every keychain add or modify from a sandboxed process (`security: SecKeychainItemModifyContent: UNIX[Operation not permitted]`) while reads still work, so a login or token refresh made inside srt is never persisted. If you hit this on an older build, upgrade srt and log in again. Whether a write lands is still decided by your filesystem rules (legacy keychains are written by the client process to `~/Library/Keychains`, so a restrictive `allowWrite` or a `denyWrite` on that directory blocks it) and by each item's ACL.
 
 **Running Jest:** Use `--no-watchman` flag to avoid sandbox violations:
 

@@ -109,7 +109,8 @@ describe.if(isMacOS)('macOS Seatbelt Symlink Boundary Validation', () => {
       console.log('\n=== Step 2: Creating symlink /tmp/claude -> / ===')
 
       const symlinkCommand = wrapCommandWithSandboxMacOS({
-        command: 'ln -s / /tmp/claude',
+        // wrapping creates the TMPDIR directory, so replace it with the link
+        command: 'rm -rf /tmp/claude && ln -s / /tmp/claude',
         needsNetworkRestriction: false,
         readConfig: undefined,
         writeConfig,
